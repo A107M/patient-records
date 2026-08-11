@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>سجل المرضى - مصحة أسيل الغد</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { font-family: 'Segoe UI', Tahoma, sans-serif; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo, useCallback } = React;
+
+// ---------------------------------------------------------------------------
+// Supabase connection — filled in with this clinic's project credentials
+// ---------------------------------------------------------------------------
+const SUPABASE_URL = "https://eodquqmvutucpwkaqmmr.supabase.co";
+const SUPABASE_KEY = "sb_publishable_v5n-43iHVyI0WayGNuLj_g_yMPJymQ4";
+const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+// ---------------------------------------------------------------------------
+// Domain config: disease categories, matching the source intake form exactly
+// ---------------------------------------------------------------------------
+const DISEASE_FIELDS = [
+  { key: "diabetes", label: "داء السكري", options: ["لا يوجد", "النوع الأول", "النوع الثاني"] },
+  { key: "bp", label: "ضغط الدم", options: ["طبيعي", "ارتفاع ضغط الدم", "هبوط ضغط الدم"] },
+  { key: "cardiac", label: "أمراض القلب والأوعية", options: ["لا يوجد", "CCF", "HF", "IHD", "أمراض القلب والشرايين (عام)"] },
+  { key: "thyroid", label: "أمراض الغدة الدرقية", options: ["لا يوجد", "Graves'", "عقيدات درقية", "فرط نشاط الغدة", "قصور الغدة"] },
+  { key: "lipids", label: "أمراض الدهون", options: ["لا يوجد", "Hypertriglyceridemia", "Hypercholesterolemia", "كلاهما"] },
+  { key: "respiratory", label: "أمراض الجهاز التنفسي", options: ["لا يوجد", "TB", "COPD", "Br. asthma"] },
+  { key: "kidney", label: "أمراض الكلى", options: ["لا يوجد", "CKD", "غسيل كلوي"] },
+  { key: "ortho", label: "أمراض المفاصل والعظام", options: ["لا يوجد", "Osteoarthritis", "Rheumatoid arthritis", "Gout", "SLE"] },
+  { key: "urology", label: "أمراض المسالك البولية", options: ["لا يوجد", "BPH", "سلس بولي", "التهاب مسالك بولية"] },
+  { key: "neuro", label: "أمراض الأعصاب", options: ["لا يوجد", "Epilepsy", "Parkinson", "اضطراب نفسي", "سكتة دماغية"] },
+  { key: "eye", label: "أمراض العيون", options: ["لا يوجد", "Glaucoma", "Cataract", "جفاف العين", "انفصال الشبكية", "اعتلال الشبكية", "فقدان البصر"] },
+  { key: "disability", label: "الإعاقة", options: ["لا يوجد", "إعاقة حركية", "إعاقة عقلية", "بتر أطراف"] },
+  { key: "derm", label: "أمراض جلدية", options: ["لا يوجد", "Vitiligo", "Eczema", "Psoriasis", "Alopecia areata", "اعتلال جلدي سكري"] },
+  { key: "hereditary", label: "أمراض وراثية", options: ["لا يوجد", "Celiac", "HTN", "DM", "CKD", "Epilepsy", "IHD"] },
+];
+
+const EMPTY_PATIENT = () => ({
+  id: null,
+  name: "",
+  sex: "ذكر",
+  age: "",
+  spo2: "",
+  prc: "",
+  bp_reading: "",
+  height: "",
+  weight: "",
+  notes: "",
+  ...Object.fromEntries(DISEASE_FIELDS.map((f) => [f.key, f.options[0]])),
+});
+
+// ---------------------------------------------------------------------------
+// Password hashing (local login gate — stored in browser only)
+// ---------------------------------------------------------------------------
+async function hashText(text) {
+  const enc = new TextEncoder().encode(text);
+  const buf = await crypto.subtle.digest("SHA-256", enc);
+  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// ---------------------------------------------------------------------------
+// Supabase data helpers
+// ---------------------------------------------------------------------------
+async function loadPatients() {
+  const { data, error } = await supabase.from("patients").select("*").order("created_at", { ascending: true });
+  if (error) {
+    console.error(error);
+    return [];
+  }
+  return data;
+}
+
+async function insertPatient(patient) {
+  const { id, ...rest } = patient;
+  const { error } = await supabase.from("patients").insert([rest]);
+  return !error;
+}
+
+async function updatePatient(patient) {
+  const { id, ...rest } = patient;
+  const { error } = await supabase.from("patients").update(rest).eq("id", id);
+  return !error;
+}
+
+async function deletePatientRow(id) {
+  const { error } = await supabase.from("patients").delete().eq("id", id);
+  return !error;
+}
+
+// ---------------------------------------------------------------------------
+// UI atoms
+// ---------------------------------------------------------------------------
+function Field({ label, children }) {
+  return (
+    <label className="block">
+      <span className="block text-[13px] font-medium text-slate-500 mb-1.5">{label}</span>
+      {children}
+    </label>
+  );
+}
+
+const inputCls = "w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-[15px] text-slate-800 outline-none transition focus:border-teal-600 focus:ring-2 focus:ring-teal-100 placeholder:text-slate-300";
+
+function Select({ value, onChange, options }) {
+  return (
+    <div className="relative">
+      <select value={value} onChange={(e) => onChange(e.target.value)}
+        className={`${inputCls} appearance-none pl-9 cursor-pointer ${value && value !== "لا يوجد" && value !== "طبيعي" ? "border-amber-300 bg-amber-50 text-amber-900 font-medium" : ""}`}>
+        {options.map((o) => <option key={o} value={o}>{o}</option>)}
+      </select>
+    </div>
+  );
+}
+
+function PasswordInput({ value, onChange, placeholder, autoFocus }) {
+  const [show, setShow] = useState(false);
+  return (
+    <div className="relative">
+      <input autoFocus={autoFocus} type={show ? "text" : "password"} value={value}
+        onChange={(e) => onChange(e.target.value)} placeholder={placeholder} className={`${inputCls} pl-10`} />
+      <button type="button" onClick={() => setShow((s) => !s)} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 text-[13px]" tabIndex={-1}>
+        {show ? "إخفاء" : "إظهار"}
+      </button>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Lock screen
+// ---------------------------------------------------------------------------
+function LockScreen({ mode, onSetup, onLogin }) {
+  const [pw, setPw] = useState("");
+  const [pw2, setPw2] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const handleSetup = async () => {
+    if (pw.length < 4) { setError("كلمة المرور قصيرة جداً — اختاري 4 أحرف أو أرقام على الأقل"); return; }
+    if (pw !== pw2) { setError("كلمتا المرور غير متطابقتين"); return; }
+    setBusy(true);
+    await onSetup(pw);
+    setBusy(false);
+  };
+
+  const handleLogin = async () => {
+    setBusy(true);
+    const ok = await onLogin(pw);
+    setBusy(false);
+    if (!ok) { setError("كلمة المرور غير صحيحة"); setPw(""); }
+  };
+
+  return (
+    <div dir="rtl" className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+      <div className="w-full max-w-sm rounded-2xl bg-white shadow-xl border border-slate-100 p-7">
+        <div className="flex flex-col items-center mb-6">
+          <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-teal-700 text-white mb-3 text-xl">🔒</div>
+          <h1 className="text-lg font-bold text-slate-800">سجل المرضى</h1>
+          <p className="text-[13px] text-slate-400 mt-0.5">مصحة أسيل الغد</p>
+        </div>
+
+        {mode === "setup" ? (
+          <div className="space-y-4">
+            <p className="text-[13px] text-slate-500 text-center leading-relaxed">
+              أول استخدام على هذا الجهاز — اختاري كلمة مرور لحماية بيانات المرضى.
+            </p>
+            <Field label="كلمة المرور">
+              <PasswordInput value={pw} onChange={setPw} placeholder="4 أحرف على الأقل" autoFocus />
+            </Field>
+            <Field label="تأكيد كلمة المرور">
+              <PasswordInput value={pw2} onChange={setPw2} placeholder="أعيدي كتابة كلمة المرور" />
+            </Field>
+            {error && <p className="text-[13px] text-red-500 text-center">{error}</p>}
+            <button onClick={handleSetup} disabled={busy} className="w-full rounded-lg bg-teal-700 py-2.5 text-[15px] font-semibold text-white transition hover:bg-teal-800 disabled:opacity-50">
+              {busy ? "جارٍ الحفظ..." : "تعيين كلمة المرور والدخول"}
+            </button>
+            <p className="text-[12px] text-amber-600 text-center leading-relaxed">
+              ملاحظة: كلمة المرور محفوظة على هذا الجهاز/المتصفح فقط. على جهاز جديد سيُطلب منك تعيينها مرة أخرى — البيانات نفسها بقاعدة البيانات لن تتأثر.
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <Field label="كلمة المرور">
+              <PasswordInput value={pw} onChange={(v) => { setPw(v); setError(""); }} placeholder="أدخلي كلمة المرور" autoFocus />
+            </Field>
+            {error && <p className="text-[13px] text-red-500 text-center">{error}</p>}
+            <button onClick={handleLogin} disabled={busy || pw.length === 0} className="w-full rounded-lg bg-teal-700 py-2.5 text-[15px] font-semibold text-white transition hover:bg-teal-800 disabled:opacity-50">
+              {busy ? "جارٍ التحقق..." : "دخول"}
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Patient form (add / edit)
+// ---------------------------------------------------------------------------
+function PatientForm({ initial, onCancel, onSave, onDelete }) {
+  const [patient, setPatient] = useState(initial);
+  const [saving, setSaving] = useState(false);
+  const isEdit = Boolean(initial.id);
+
+  const update = (key, value) => setPatient((p) => ({ ...p, [key]: value }));
+
+  const activeDiseaseCount = DISEASE_FIELDS.filter(
+    (f) => patient[f.key] && patient[f.key] !== "لا يوجد" && patient[f.key] !== "طبيعي"
+  ).length;
+
+  const canSave = patient.name.trim().length > 0 && !saving;
+
+  const handleSaveClick = async () => {
+    setSaving(true);
+    await onSave(patient);
+    setSaving(false);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-900/40 backdrop-blur-sm p-4 sm:p-8" dir="rtl">
+      <div className="w-full max-w-3xl rounded-2xl bg-white shadow-2xl my-4 overflow-hidden">
+        <div className="sticky top-0 z-10 flex items-center justify-between border-b border-slate-100 bg-white px-6 py-4">
+          <div>
+            <h2 className="text-lg font-bold text-slate-800">{isEdit ? "تعديل بيانات المريض" : "إضافة مريض جديد"}</h2>
+            {activeDiseaseCount > 0 && <p className="text-[13px] text-amber-600 mt-0.5">{activeDiseaseCount} حالة مرضية مسجّلة</p>}
+          </div>
+          <button onClick={onCancel} className="rounded-full p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-600 transition text-xl leading-none">×</button>
+        </div>
+
+        <div className="px-6 py-5 space-y-6">
+          <section>
+            <h3 className="text-[13px] font-bold uppercase tracking-wide text-teal-700 mb-3">البيانات الأساسية</h3>
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+              <div className="col-span-2 sm:col-span-3">
+                <Field label="الاسم">
+                  <input autoFocus className={inputCls} value={patient.name} onChange={(e) => update("name", e.target.value)} placeholder="اسم المريض الكامل" />
+                </Field>
+              </div>
+              <Field label="الجنس"><Select value={patient.sex} onChange={(v) => update("sex", v)} options={["ذكر", "أنثى"]} /></Field>
+              <Field label="العمر"><input className={inputCls} value={patient.age} onChange={(e) => update("age", e.target.value)} placeholder="بالسنوات" inputMode="numeric" /></Field>
+              <Field label="نسبة الأكسجين"><input className={inputCls} value={patient.spo2} onChange={(e) => update("spo2", e.target.value)} placeholder="%" /></Field>
+              <Field label="PRC"><input className={inputCls} value={patient.prc} onChange={(e) => update("prc", e.target.value)} /></Field>
+              <Field label="قراءة ضغط الدم"><input className={inputCls} value={patient.bp_reading} onChange={(e) => update("bp_reading", e.target.value)} placeholder="مثال: 120/80" /></Field>
+              <Field label="الطول"><input className={inputCls} value={patient.height} onChange={(e) => update("height", e.target.value)} placeholder="سم" /></Field>
+              <Field label="الوزن"><input className={inputCls} value={patient.weight} onChange={(e) => update("weight", e.target.value)} placeholder="كغم" /></Field>
+            </div>
+          </section>
+
+          <section>
+            <h3 className="text-[13px] font-bold uppercase tracking-wide text-teal-700 mb-3">الحالة الصحية</h3>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {DISEASE_FIELDS.map((f) => (
+                <Field key={f.key} label={f.label}>
+                  <Select value={patient[f.key]} onChange={(v) => update(f.key, v)} options={f.options} />
+                </Field>
+              ))}
+            </div>
+          </section>
+
+          <section>
+            <Field label="ملاحظات إضافية">
+              <textarea className={`${inputCls} min-h-[80px] resize-y`} value={patient.notes || ""} onChange={(e) => update("notes", e.target.value)} placeholder="أي ملاحظات أخرى..." />
+            </Field>
+          </section>
+        </div>
+
+        <div className="sticky bottom-0 flex items-center justify-between gap-3 border-t border-slate-100 bg-white px-6 py-4">
+          {isEdit ? (
+            <button onClick={() => onDelete(patient.id)} className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-[14px] font-medium text-red-500 hover:bg-red-50 transition">
+              حذف المريض
+            </button>
+          ) : <span />}
+          <div className="flex items-center gap-2">
+            <button onClick={onCancel} className="rounded-lg px-4 py-2 text-[14px] font-medium text-slate-500 hover:bg-slate-100 transition">إلغاء</button>
+            <button disabled={!canSave} onClick={handleSaveClick} className="flex items-center gap-1.5 rounded-lg bg-teal-700 px-5 py-2 text-[14px] font-semibold text-white transition hover:bg-teal-800 disabled:cursor-not-allowed disabled:opacity-40">
+              {saving ? "جارٍ الحفظ..." : "حفظ"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Patient card
+// ---------------------------------------------------------------------------
+function PatientCard({ patient, onClick }) {
+  const activeDiseases = DISEASE_FIELDS.filter(
+    (f) => patient[f.key] && patient[f.key] !== "لا يوجد" && patient[f.key] !== "طبيعي"
+  );
+
+  return (
+    <button onClick={onClick} className="w-full text-right rounded-xl border border-slate-200 bg-white p-4 transition hover:border-teal-300 hover:shadow-md">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-teal-50 text-teal-700 font-bold text-[15px]">
+            {patient.name.trim().charAt(0) || "؟"}
+          </div>
+          <div>
+            <h3 className="font-bold text-slate-800 text-[15px]">{patient.name || "بدون اسم"}</h3>
+            <p className="text-[13px] text-slate-400">{patient.sex} {patient.age && `· ${patient.age} سنة`}</p>
+          </div>
+        </div>
+        {activeDiseases.length > 0 && (
+          <span className="shrink-0 rounded-full bg-amber-50 px-2.5 py-1 text-[12px] font-semibold text-amber-700">{activeDiseases.length} حالة</span>
+        )}
+      </div>
+      {activeDiseases.length > 0 && (
+        <div className="mt-3 flex flex-wrap gap-1.5">
+          {activeDiseases.slice(0, 4).map((f) => (
+            <span key={f.key} className="rounded-md bg-slate-50 px-2 py-0.5 text-[12px] text-slate-600 border border-slate-100">{f.label}: {patient[f.key]}</span>
+          ))}
+          {activeDiseases.length > 4 && (
+            <span className="rounded-md bg-slate-50 px-2 py-0.5 text-[12px] text-slate-400 border border-slate-100">+{activeDiseases.length - 4} أخرى</span>
+          )}
+        </div>
+      )}
+    </button>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Main App
+// ---------------------------------------------------------------------------
+function App() {
+  const [authState, setAuthState] = useState("checking");
+  const [patients, setPatients] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [query, setQuery] = useState("");
+  const [diseaseFilter, setDiseaseFilter] = useState("all");
+  const [editing, setEditing] = useState(null);
+  const [saveState, setSaveState] = useState("idle");
+
+  useEffect(() => {
+    const storedHash = localStorage.getItem("aseel_clinic_pw_hash");
+    setAuthState(storedHash ? "locked" : "setup");
+  }, []);
+
+  useEffect(() => {
+    if (authState === "unlocked") {
+      (async () => {
+        const list = await loadPatients();
+        setPatients(list);
+        setLoading(false);
+      })();
+    }
+  }, [authState]);
+
+  const handleSetupPassword = async (pw) => {
+    const hash = await hashText(pw);
+    localStorage.setItem("aseel_clinic_pw_hash", hash);
+    setAuthState("unlocked");
+  };
+
+  const handleLogin = async (pw) => {
+    const hash = await hashText(pw);
+    const stored = localStorage.getItem("aseel_clinic_pw_hash");
+    if (hash === stored) { setAuthState("unlocked"); return true; }
+    return false;
+  };
+
+  const refreshAndFlash = useCallback(async (ok) => {
+    setSaveState(ok ? "saved" : "error");
+    const list = await loadPatients();
+    setPatients(list);
+    setTimeout(() => setSaveState("idle"), 1500);
+  }, []);
+
+  const handleSave = async (patient) => {
+    setSaveState("saving");
+    let ok;
+    if (patient.id) ok = await updatePatient(patient);
+    else ok = await insertPatient(patient);
+    await refreshAndFlash(ok);
+    setEditing(null);
+  };
+
+  const handleDelete = async (id) => {
+    setSaveState("saving");
+    const ok = await deletePatientRow(id);
+    await refreshAndFlash(ok);
+    setEditing(null);
+  };
+
+  const filtered = useMemo(() => {
+    return patients.filter((p) => {
+      const matchesQuery = query.trim() === "" || p.name.toLowerCase().includes(query.trim().toLowerCase());
+      const matchesDisease = diseaseFilter === "all" || (p[diseaseFilter] && p[diseaseFilter] !== "لا يوجد" && p[diseaseFilter] !== "طبيعي");
+      return matchesQuery && matchesDisease;
+    });
+  }, [patients, query, diseaseFilter]);
+
+  const stats = useMemo(() => {
+    const total = patients.length;
+    const diabetic = patients.filter((p) => p.diabetes && p.diabetes !== "لا يوجد").length;
+    const hypertensive = patients.filter((p) => p.bp === "ارتفاع ضغط الدم").length;
+    return { total, diabetic, hypertensive };
+  }, [patients]);
+
+  if (authState === "checking") {
+    return <div className="min-h-screen bg-slate-50 flex items-center justify-center text-slate-400" dir="rtl">جارٍ التحميل...</div>;
+  }
+  if (authState === "setup") return <LockScreen mode="setup" onSetup={handleSetupPassword} onLogin={handleLogin} />;
+  if (authState === "locked") return <LockScreen mode="login" onSetup={handleSetupPassword} onLogin={handleLogin} />;
+
+  return (
+    <div dir="rtl" className="min-h-screen bg-slate-50">
+      <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/90 backdrop-blur">
+        <div className="mx-auto max-w-5xl px-4 sm:px-6 py-4">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5">
+              <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-teal-700 text-white">📋</div>
+              <div>
+                <h1 className="text-[17px] font-bold text-slate-800 leading-tight">سجل المرضى</h1>
+                <p className="text-[12px] text-slate-400 leading-tight">مصحة أسيل الغد</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              {saveState !== "idle" && (
+                <span className={`hidden sm:flex items-center gap-1 text-[13px] font-medium ${saveState === "saved" ? "text-teal-600" : saveState === "error" ? "text-red-500" : "text-slate-400"}`}>
+                  {saveState === "saving" ? "جارٍ الحفظ..." : saveState === "saved" ? "تم الحفظ" : "تعذّر الحفظ"}
+                </span>
+              )}
+              <button onClick={() => setEditing(EMPTY_PATIENT())} className="flex items-center gap-1.5 rounded-lg bg-teal-700 px-4 py-2 text-[14px] font-semibold text-white transition hover:bg-teal-800">
+                + إضافة مريض
+              </button>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <main className="mx-auto max-w-5xl px-4 sm:px-6 py-6">
+        <div className="mb-5 grid grid-cols-3 gap-3">
+          <div className="rounded-xl border border-slate-200 bg-white p-4">
+            <div className="text-[12px] font-medium text-slate-400 mb-1">إجمالي المرضى</div>
+            <p className="text-2xl font-bold text-slate-800">{stats.total}</p>
+          </div>
+          <div className="rounded-xl border border-slate-200 bg-white p-4">
+            <div className="text-[12px] font-medium text-slate-400 mb-1">مرضى السكري</div>
+            <p className="text-2xl font-bold text-amber-600">{stats.diabetic}</p>
+          </div>
+          <div className="rounded-xl border border-slate-200 bg-white p-4">
+            <div className="text-[12px] font-medium text-slate-400 mb-1">ارتفاع الضغط</div>
+            <p className="text-2xl font-bold text-rose-600">{stats.hypertensive}</p>
+          </div>
+        </div>
+
+        <div className="mb-5 flex flex-col sm:flex-row gap-3">
+          <div className="relative flex-1">
+            <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="ابحث بالاسم..." className={inputCls} />
+          </div>
+          <div className="relative sm:w-64">
+            <select value={diseaseFilter} onChange={(e) => setDiseaseFilter(e.target.value)} className={`${inputCls} appearance-none cursor-pointer`}>
+              <option value="all">كل الحالات</option>
+              {DISEASE_FIELDS.map((f) => <option key={f.key} value={f.key}>{f.label}</option>)}
+            </select>
+          </div>
+        </div>
+
+        {loading ? (
+          <div className="py-20 text-center text-slate-400">جارٍ التحميل...</div>
+        ) : filtered.length === 0 ? (
+          <div className="rounded-xl border border-dashed border-slate-300 bg-white py-16 text-center">
+            <p className="text-slate-500 font-medium">{patients.length === 0 ? "لا يوجد مرضى بعد" : "لا توجد نتائج مطابقة"}</p>
+            <p className="text-[13px] text-slate-400 mt-1">{patients.length === 0 ? 'اضغط "إضافة مريض" للبدء' : "جرّب تعديل كلمة البحث أو الفلتر"}</p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {filtered.map((p) => <PatientCard key={p.id} patient={p} onClick={() => setEditing(p)} />)}
+          </div>
+        )}
+      </main>
+
+      {editing && <PatientForm initial={editing} onCancel={() => setEditing(null)} onSave={handleSave} onDelete={handleDelete} />}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+
+</body>
+</html>
